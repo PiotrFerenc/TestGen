@@ -21,6 +21,15 @@ No CLI parameters. Edit `appsettings.json` next to the binary (or override with 
 }
 ```
 
+Custom headers for the LLM endpoint go in `Llm:Headers`. `{ApiKey}` in a value is replaced with `Llm:ApiKey`. A configured `Authorization` header overrides the default `Bearer <ApiKey>`:
+
+```json
+"Llm": {
+  "ApiKey": "secret",
+  "Headers": { "Authorization": "Token {ApiKey}", "X-Org": "my-org" }
+}
+```
+
 ```sh
 dotnet publish TestGen.Cli -o out
 cd out && ./testgen

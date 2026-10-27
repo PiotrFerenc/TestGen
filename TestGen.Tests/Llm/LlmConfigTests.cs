@@ -102,4 +102,34 @@ public class LlmConfigTests
         client.DefaultRequestHeaders.GetValues("X-Custom").ShouldBe(["abc"]);
         client.Timeout.ShouldBe(TimeSpan.FromSeconds(42));
     }
+
+    [Fact]
+    public void Headers_substitute_api_key_placeholder_and_override_authorization()
+    {
+        var values = Valid();
+        values["Llm:ApiKey"] = "secret";
+        values["Llm:Headers:Authorization"] = "Token {ApiKey}";
+        values["Llm:Headers:X-Api-Key"] = "{ApiKey}";
+        values["Llm:Headers:X-Plain"] = "{ApiKey}-literal";
+        using var sp = Build(values);
+
+        var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(LlmOptions.HttpClientName);
+
+        client.DefaultRequestHeaders.GetValues("Authorization").ShouldBe(["Token secret"]);
+        client.DefaultRequestHeaders.GetValues("X-Api-Key").ShouldBe(["secret"]);
+        client.DefaultRequestHeaders.GetValues("X-Plain").ShouldBe(["secret-literal"]);
+    }
+
+    [Fact]
+    public void Headers_without_api_key_keep_placeholder_verbatim()
+    {
+        var values = Valid();
+        values["Llm:Headers:X-Api-Key"] = "{ApiKey}";
+        using var sp = Build(values);
+
+        var client = sp.GetRequiredService<IHttpClientFactory>().CreateClient(LlmOptions.HttpClientName);
+
+        client.DefaultRequestHeaders.Authorization.ShouldBeNull();
+        client.DefaultRequestHeaders.GetValues("X-Api-Key").ShouldBe(["{ApiKey}"]);
+    }
 }
