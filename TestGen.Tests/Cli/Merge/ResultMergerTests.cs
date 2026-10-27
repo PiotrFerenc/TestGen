@@ -55,6 +55,20 @@ public sealed class ResultMergerTests
     }
 
     [Fact]
+    public async Task Second_merge_of_same_state_is_a_no_op()
+    {
+        var state = State(Done("a"));
+        await Sut().MergeAsync(state, CancellationToken.None);
+
+        var again = await Sut().MergeAsync(state, CancellationToken.None);
+
+        again.MergedIds.ShouldBeEmpty();
+        again.Rejected.ShouldBeEmpty();
+        state.Items[0].Status.ShouldBe(WorkStatus.Done);
+        await _git.Received(1).MergeAsync("testgen/a", Arg.Any<CancellationToken>(), Arg.Any<string?>());
+    }
+
+    [Fact]
     public async Task Conflict_rejects_item_and_marks_it_failed()
     {
         var a = Done("a");

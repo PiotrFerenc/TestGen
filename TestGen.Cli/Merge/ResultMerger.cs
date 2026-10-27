@@ -40,6 +40,7 @@ public sealed class ResultMerger(IGitRunner repoGit, IDotnetRunner dotnet, TestG
                 merged.Add(item.Id);
                 last = (true, true);
                 await repoGit.DeleteBranchAsync(item.Branch!, force: true, ct);
+                item.Branch = null; // merged and deleted: a resumed run must not merge it again
                 logger.LogInformation("Merged {Id}", item.Id);
             }
             else

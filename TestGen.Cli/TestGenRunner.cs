@@ -51,10 +51,7 @@ public sealed class TestGenRunner(
         {
             var xml = await coverage.CollectAsync(solutionPath, Path.Combine(o.WorkDir, "coverage-before.xml"), o.TestTimeout, ct);
             before = new CoverageExclusions().Apply(CoberturaParser.ParseFile(xml));
-            CoverageReportWriter.WriteJson(before, beforeJson);
-            CoverageReportWriter.WriteHtml(before, null, Path.Combine(o.WorkDir, "coverage-before.html"));
         }
-        PrintTotals("before", before);
 
         ProgressUi.Section("Analysis");
         var solution = await SolutionLoader.OpenAsync(solutionPath, log, ct);
@@ -71,6 +68,11 @@ public sealed class TestGenRunner(
             solution = await SolutionLoader.OpenAsync(solutionPath, log, ct);
         }
         var baseCommit = await git.HeadShaAsync(ct);
+        // Scoped after bootstrap: test classes are not targets, and projects never loaded by tests still need work items.
+        before = CoverageScope.Apply(before, solution);
+        CoverageReportWriter.WriteJson(before, beforeJson);
+        CoverageReportWriter.WriteHtml(before, null, Path.Combine(o.WorkDir, "coverage-before.html"));
+        PrintTotals("before", before);
 
         ProgressUi.Section("Plan");
         var items = await WorkPlanBuilder.BuildAsync(solution, before, o, log, ct);
@@ -94,7 +96,7 @@ public sealed class TestGenRunner(
         try
         {
             var xml = await coverage.CollectAsync(solutionPath, Path.Combine(o.WorkDir, "coverage-after.xml"), o.TestTimeout, ct);
-            after = new CoverageExclusions().Apply(CoberturaParser.ParseFile(xml));
+            after = CoverageScope.Apply(new CoverageExclusions().Apply(CoberturaParser.ParseFile(xml)), solution);
             CoverageReportWriter.WriteJson(after, Path.Combine(o.WorkDir, "coverage-after.json"));
             CoverageReportWriter.WriteHtml(before, after, Path.Combine(o.WorkDir, "coverage-report.html"));
             PrintTotals("after", after);
