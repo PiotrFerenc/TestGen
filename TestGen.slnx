@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="TestGen.Analysis/TestGen.Analysis.csproj" />
+  <Project Path="TestGen.Cli/TestGen.Cli.csproj" />
+  <Project Path="TestGen.Coverage/TestGen.Coverage.csproj" />
+  <Project Path="TestGen.Git/TestGen.Git.csproj" />
+  <Project Path="TestGen.Llm/TestGen.Llm.csproj" />
+  <Project Path="TestGen.Queue/TestGen.Queue.csproj" />
+  <Project Path="TestGen.Tests/TestGen.Tests.csproj" />
+</Solution>

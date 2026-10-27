@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <AssemblyName>testgen</AssemblyName>
+    <RootNamespace>TestGen.Cli</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="10.0.12" />
+    <PackageReference Include="Spectre.Console" Version="0.57.2" />
+    <PackageReference Include="Microsoft.Build.Framework" Version="17.11.48" ExcludeAssets="runtime" PrivateAssets="all" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../TestGen.Coverage/TestGen.Coverage.csproj" />
+    <ProjectReference Include="../TestGen.Analysis/TestGen.Analysis.csproj" />
+    <ProjectReference Include="../TestGen.Git/TestGen.Git.csproj" />
+    <ProjectReference Include="../TestGen.Queue/TestGen.Queue.csproj" />
+    <ProjectReference Include="../TestGen.Llm/TestGen.Llm.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Update="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>
