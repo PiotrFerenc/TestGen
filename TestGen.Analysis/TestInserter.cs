@@ -10,12 +10,14 @@ namespace TestGen.Analysis;
 
 public static class TestInserter
 {
-    public static async Task<string> InsertAsync(Document existingTestDocument, CompilationUnitSyntax snippet, CancellationToken ct)
+    public static async Task<string> InsertAsync(Document existingTestDocument, CompilationUnitSyntax snippet, CancellationToken ct, string? className = null)
     {
         var editor = await DocumentEditor.CreateAsync(existingTestDocument, ct);
         var root = (CompilationUnitSyntax)editor.OriginalRoot;
-        var cls = root.DescendantNodes().OfType<ClassDeclarationSyntax>().FirstOrDefault()
-                  ?? throw new InvalidOperationException($"No class in {existingTestDocument.FilePath}");
+        var cls = root.DescendantNodes().OfType<ClassDeclarationSyntax>().FirstOrDefault(c => className is null || c.Identifier.Text == className)
+                  ?? throw new InvalidOperationException(className is null
+                      ? $"No class in {existingTestDocument.FilePath}"
+                      : $"Class '{className}' not found in {existingTestDocument.FilePath}");
 
         editor.InsertMembers(cls, cls.Members.Count, snippet.Members.Select(m => m.WithAdditionalAnnotations(Formatter.Annotation)));
 

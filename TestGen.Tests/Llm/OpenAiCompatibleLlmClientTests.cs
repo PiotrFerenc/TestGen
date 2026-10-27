@@ -16,10 +16,12 @@ public class OpenAiCompatibleLlmClientTests
     {
         public HttpRequestMessage? Request;
         public string? Body;
+        public long? LengthBeforeRead;
 
         protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken ct)
         {
             Request = request;
+            LengthBeforeRead = request.Content?.Headers.ContentLength; // before buffering, as a real socket sees it
             Body = request.Content is null ? null : await request.Content.ReadAsStringAsync(ct);
             return respond(request);
         }
@@ -53,6 +55,8 @@ public class OpenAiCompatibleLlmClientTests
         await client.CompleteAsync(Messages, CancellationToken.None);
 
         handler.Request!.Method.ShouldBe(HttpMethod.Post);
+        handler.LengthBeforeRead.ShouldBe(Encoding.UTF8.GetByteCount(handler.Body!)); // not chunked
+        handler.Request.Content!.Headers.ContentType!.MediaType.ShouldBe("application/json");
         handler.Request.RequestUri!.AbsoluteUri.ShouldBe("http://llm/v1/chat/completions");
         using var doc = JsonDocument.Parse(handler.Body!);
         var root = doc.RootElement;

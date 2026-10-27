@@ -290,4 +290,38 @@ public sealed class GitRunnerTests : IAsyncLifetime
     [Fact]
     public void SanitizeBranchName_NothingUsable_Throws() =>
         Should.Throw<ArgumentException>(() => GitRunner.SanitizeBranchName("~~~"));
+
+    [Fact]
+    public async Task Concurrent_WorktreeAddRemovePrune_DoNotInterfere()
+    {
+        var tasks = Enumerable.Range(0, 4).Select(i => Task.Run(async () =>
+        {
+            for (var round = 0; round < 3; round++)
+            {
+                var path = Path.Combine(_root, $"wt-{i}-{round}");
+                var branch = $"testgen/p{i}-{round}";
+                var wt = await _git.WorktreeAddAsync(path, branch, "HEAD", Ct);
+                File.WriteAllText(Path.Combine(path, $"f{i}.txt"), "x");
+                await wt.AddAllAsync(Ct);
+                await wt.CommitAsync($"c{i}", Ct);
+                await wt.WorktreePruneAsync(Ct); // shares the main repo's lock
+                await _git.WorktreeRemoveAsync(path, force: true, Ct);
+                await _git.WorktreePruneAsync(Ct);
+                await _git.DeleteBranchAsync(branch, force: true, Ct);
+            }
+        })).ToList();
+
+        await Task.WhenAll(tasks);
+        (await _git.WorktreeListAsync(Ct)).Count.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task RunAsync_GrandchildHoldingPipe_CancellationStillReturns()
+    {
+        // The alias shell exits at once; the backgrounded sleep keeps stdout open.
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(500));
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        await Should.ThrowAsync<OperationCanceledException>(() => _git.RunAsync("-c \"alias.hang=!sleep 5 &\" hang", cts.Token));
+        sw.Elapsed.ShouldBeLessThan(TimeSpan.FromSeconds(4));
+    }
 }

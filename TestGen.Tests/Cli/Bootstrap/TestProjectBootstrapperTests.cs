@@ -72,9 +72,13 @@ public sealed class TestProjectBootstrapperTests : IDisposable
         File.ReadAllText(Path.Combine(_root, "src/Acme.Core.Tests/GlobalUsings.cs"))
             .ShouldBe("global using Xunit;\nglobal using NSubstitute;\nglobal using Shouldly;\n");
 
-        await _dotnet.Received(1).RunAsync($"sln \"{_options.SolutionPath}\" add \"{csproj}\"", _options.SolutionDir, TimeSpan.FromMinutes(2), Arg.Any<CancellationToken>());
-        await _dotnet.Received(1).RestoreAsync(csproj, Arg.Any<CancellationToken>());
-        await _git.Received(1).AddAllAsync(Arg.Any<CancellationToken>());
+        Received.InOrder(() =>
+        {
+            _dotnet.RestoreAsync(csproj, Arg.Any<CancellationToken>());
+            _dotnet.RunAsync($"sln \"{_options.SolutionPath}\" add \"{csproj}\"", _options.SolutionDir, TimeSpan.FromMinutes(2), Arg.Any<CancellationToken>());
+        });
+        await _git.Received(1).AddAsync(Arg.Is<IEnumerable<string>>(p => p.SequenceEqual(new[] { _options.SolutionPath, Path.GetDirectoryName(csproj)! })), Arg.Any<CancellationToken>());
+        await _git.DidNotReceive().AddAllAsync(Arg.Any<CancellationToken>());
         await _git.Received(1).CommitAsync("testgen: bootstrap test projects", Arg.Any<CancellationToken>());
     }
 
@@ -125,6 +129,18 @@ public sealed class TestProjectBootstrapperTests : IDisposable
         var ex = await Should.ThrowAsync<InvalidOperationException>(() => Sut().BootstrapAsync(_solution, TestConventions.Default("xunit", "NSubstitute", "Shouldly"), CancellationToken.None));
 
         ex.Message.ShouldContain("boom: solution is broken");
+        await _git.DidNotReceiveWithAnyArgs().CommitAsync(default!, default);
+    }
+
+    [Fact]
+    public async Task Failing_restore_does_not_touch_the_solution()
+    {
+        AddProject("src/Acme.Core/Acme.Core.csproj", Csproj());
+        _dotnet.RestoreAsync(default!, default).ReturnsForAnyArgs(new DotnetResult(1, "NU1101: package not found"));
+
+        await Should.ThrowAsync<InvalidOperationException>(() => Sut().BootstrapAsync(_solution, TestConventions.Default("xunit", "NSubstitute", "Shouldly"), CancellationToken.None));
+
+        await _dotnet.DidNotReceiveWithAnyArgs().RunAsync(default!, default!, default, default);
         await _git.DidNotReceiveWithAnyArgs().CommitAsync(default!, default);
     }
 

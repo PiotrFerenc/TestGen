@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
@@ -50,6 +51,12 @@ public sealed partial class GitRunner(string workDir, ILogger<GitRunner>? logger
 
     public string WorkDir { get; } = Path.GetFullPath(workDir);
 
+    // Worktree/branch mutations on one repo must not interleave (prune can drop admin dirs of a worktree being added).
+    // Keyed by the main runner's WorkDir; runners from WorktreeAddAsync inherit it.
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> RepoLocks = new();
+    private string LockKey { get; init; } = Path.GetFullPath(workDir);
+    private static readonly TimeSpan OutputGrace = TimeSpan.FromSeconds(30);
+
     public async Task<GitResult> RunAsync(string args, CancellationToken ct, bool throwOnError = true)
     {
         var psi = new ProcessStartInfo("git", args)
@@ -76,6 +83,18 @@ public sealed partial class GitRunner(string workDir, ILogger<GitRunner>? logger
         {
             try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
             throw;
+        }
+
+        // A grandchild (hook, credential helper) may keep the pipes open after git exits.
+        try
+        {
+            await Task.WhenAll(stdout, stderr).WaitAsync(OutputGrace, ct);
+        }
+        catch (Exception e) when (e is TimeoutException or OperationCanceledException)
+        {
+            try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            ct.ThrowIfCancellationRequested();
+            throw new GitException(args, p.ExitCode, $"output pipes still open {OutputGrace.TotalSeconds}s after exit");
         }
 
         var result = new GitResult(p.ExitCode, await stdout, await stderr);
@@ -114,10 +133,10 @@ public sealed partial class GitRunner(string workDir, ILogger<GitRunner>? logger
         (await RunAsync($"show-ref --verify --quiet {Q("refs/heads/" + name)}", ct, throwOnError: false)).ExitCode == 0;
 
     public Task CreateBranchAsync(string name, string startPoint, CancellationToken ct) =>
-        RunAsync($"branch {Q(name)} {Q(startPoint)}", ct);
+        RunLockedAsync($"branch {Q(name)} {Q(startPoint)}", ct);
 
     public Task DeleteBranchAsync(string name, bool force, CancellationToken ct) =>
-        RunAsync($"branch {(force ? "-D" : "-d")} {Q(name)}", ct);
+        RunLockedAsync($"branch {(force ? "-D" : "-d")} {Q(name)}", ct);
 
     public Task CheckoutAsync(string refName, CancellationToken ct) =>
         RunAsync($"checkout {Q(refName)}", ct);
@@ -137,14 +156,22 @@ public sealed partial class GitRunner(string workDir, ILogger<GitRunner>? logger
     public async Task<IGitRunner> WorktreeAddAsync(string path, string branch, string startPoint, CancellationToken ct)
     {
         var full = Path.GetFullPath(path);
-        await RunAsync($"worktree add -b {Q(branch)} {Q(full)} {Q(startPoint)}", ct);
-        return new GitRunner(full, logger);
+        await RunLockedAsync($"worktree add -b {Q(branch)} {Q(full)} {Q(startPoint)}", ct);
+        return new GitRunner(full, logger) { LockKey = LockKey };
     }
 
     public Task WorktreeRemoveAsync(string path, bool force, CancellationToken ct) =>
-        RunAsync($"worktree remove {(force ? "--force " : "")}{Q(Path.GetFullPath(path))}", ct);
+        RunLockedAsync($"worktree remove {(force ? "--force " : "")}{Q(Path.GetFullPath(path))}", ct);
 
-    public Task WorktreePruneAsync(CancellationToken ct) => RunAsync("worktree prune", ct);
+    public Task WorktreePruneAsync(CancellationToken ct) => RunLockedAsync("worktree prune", ct);
+
+    private async Task<GitResult> RunLockedAsync(string args, CancellationToken ct)
+    {
+        var gate = RepoLocks.GetOrAdd(LockKey, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(ct);
+        try { return await RunAsync(args, ct); }
+        finally { gate.Release(); }
+    }
 
     public async Task<IReadOnlyList<WorktreeInfo>> WorktreeListAsync(CancellationToken ct)
     {

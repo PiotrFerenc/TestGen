@@ -39,6 +39,11 @@ public sealed class WorkItemProcessorTests : IDisposable
         {
             public int Count() { return 1; }
         }
+
+        public class Greeter
+        {
+            public string Hello() => "hi";
+        }
         """;
 
     const string ExistingTests = """
@@ -54,6 +59,12 @@ public sealed class WorkItemProcessorTests : IDisposable
                 Assert.Equal(3, new Calc(null!).Add(1, 2));
             }
         }
+
+        public class GreeterTests
+        {
+            [Fact(Skip = "pre-existing skip must not block generation")]
+            public void Old() { Assert.True(true); }
+        }
         """;
 
     const string Placeholder = "namespace Acme.Core.Tests;\n\npublic class Other { }\n";
@@ -68,6 +79,18 @@ public sealed class WorkItemProcessorTests : IDisposable
         public void Twice_Doubles()
         {
             new Calc(Substitute.For<IClock>()).Twice(2).ShouldBe(4);
+        }
+        ```
+        """;
+
+    const string GreeterSnippet = """
+        ```csharp
+        using Shouldly;
+
+        [Fact]
+        public void Hello_Greets()
+        {
+            new Greeter().Hello().ShouldBe("hi");
         }
         ```
         """;
@@ -114,13 +137,15 @@ public sealed class WorkItemProcessorTests : IDisposable
             return _wt;
         });
         _wt.WorkDir.Returns(_ => WtDir);
-        _wt.RunAsync("status --porcelain", Arg.Any<CancellationToken>(), Arg.Any<bool>())
-            .Returns(new GitResult(0, " M tests/Acme.Core.Tests/CalcTests.cs\n?? tests/Acme.Core.Tests/obj/x.json\n", ""));
+        Status(" M tests/Acme.Core.Tests/CalcTests.cs\0?? tests/Acme.Core.Tests/obj/x.json\0");
         _dotnet.BuildAsync(default!, default).ReturnsForAnyArgs(new DotnetResult(0, ""));
         _dotnet.TestAsync(default!, default, default).ReturnsForAnyArgs(new DotnetResult(0, ""));
         CoverageAfter();
         _llm.CompleteAsync(default!, default).ReturnsForAnyArgs(Response(ValidSnippet));
     }
+
+    void Status(string porcelainZ) =>
+        _wt.RunAsync(WorkItemProcessor.StatusArgs, Arg.Any<CancellationToken>(), Arg.Any<bool>()).Returns(new GitResult(0, porcelainZ, ""));
 
     public void Dispose()
     {
@@ -137,6 +162,11 @@ public sealed class WorkItemProcessorTests : IDisposable
               <methods>
                 <method name="Add" signature="(int, int)"><lines><line number="7" hits="1" branch="false" /></lines></method>
                 <method name="Twice" signature="(int)"><lines><line number="10" hits="{twiceHits}" branch="false" /></lines></method>
+              </methods>
+            </class>
+            <class name="Acme.Core.Greeter" filename="/src/Acme.Core/Calc.cs" line-rate="0">
+              <methods>
+                <method name="Hello" signature="()"><lines><line number="24" hits="{twiceHits}" branch="false" /></lines></method>
               </methods>
             </class>
             <class name="Acme.Core.Repo" filename="/src/Acme.Core/Calc.cs" line-rate="0">
@@ -201,12 +231,12 @@ public sealed class WorkItemProcessorTests : IDisposable
         }
     }
 
-    WorkItem Item(string cls = "Acme.Core.Calc") => new()
+    WorkItem Item(params string[] classes) => new()
     {
         Id = Id,
         TargetTestFile = TestFile,
         TestProjectPath = TestCsproj,
-        Classes = [new WorkClass(cls, $"{_root}/src/Acme.Core/Calc.cs", 1, ["Twice"])],
+        Classes = (classes.Length == 0 ? ["Acme.Core.Calc"] : classes).Select(c => new WorkClass(c, $"{_root}/src/Acme.Core/Calc.cs", 1, ["Twice"])).ToList(),
         CoverageBefore = 0.5,
     };
 
@@ -231,6 +261,8 @@ public sealed class WorkItemProcessorTests : IDisposable
         await _git.Received().WorktreeRemoveAsync(WtDir, true, Arg.Any<CancellationToken>());
         await _git.DidNotReceiveWithAnyArgs().DeleteBranchAsync(default!, default, default);
         File.Exists(Path.Combine(WtDir, ".testgen-coverage.xml")).ShouldBeFalse();
+        // Same scope as the baseline: the whole solution, mapped into the worktree, built there.
+        await _coverage.Received().CollectAsync(Path.Combine(WtDir, "Acme.slnx"), Arg.Any<string>(), _options.TestTimeout, Arg.Any<CancellationToken>(), null, false);
         // Main tree untouched.
         (await File.ReadAllTextAsync(TestFile)).ShouldBe(ExistingTests);
     }
@@ -308,8 +340,7 @@ public sealed class WorkItemProcessorTests : IDisposable
     [Fact]
     public async Task ProductionFileChanged_Fails()
     {
-        _wt.RunAsync("status --porcelain", Arg.Any<CancellationToken>(), Arg.Any<bool>())
-            .Returns(new GitResult(0, " M tests/Acme.Core.Tests/CalcTests.cs\n M src/Acme.Core/Calc.cs\n", ""));
+        Status(" M tests/Acme.Core.Tests/CalcTests.cs\0 M src/Acme.Core/Calc.cs\0");
 
         var result = await Processor().ProcessAsync(Item(), CancellationToken.None);
 
@@ -336,7 +367,7 @@ public sealed class WorkItemProcessorTests : IDisposable
         var result = await Processor().ProcessAsync(Item(), CancellationToken.None);
 
         result.Status.ShouldBe(WorkStatus.Failed);
-        result.Reason.ShouldBe("model offline");
+        result.Reason!.ShouldContain("model offline");
         await _git.Received().DeleteBranchAsync(Branch, true, Arg.Any<CancellationToken>());
     }
 
@@ -352,5 +383,89 @@ public sealed class WorkItemProcessorTests : IDisposable
         _git.ReceivedCalls().Select(c => c.GetMethodInfo().Name)
             .Where(n => n is "WorktreeRemoveAsync" or "DeleteBranchAsync" or "WorktreeAddAsync").Take(3)
             .ShouldBe(["WorktreeRemoveAsync", "DeleteBranchAsync", "WorktreeAddAsync"]);
+    }
+
+    [Fact]
+    public async Task Cleanup_PrunesFirstAndToleratesRemoveAndDeleteFailures()
+    {
+        Directory.CreateDirectory(WtDir);
+        _git.BranchExistsAsync(Branch, Arg.Any<CancellationToken>()).Returns(true);
+        // Only the leftover cleanup (first call) fails; the post-commit removal succeeds.
+        _git.WorktreeRemoveAsync(default!, default, default).ReturnsForAnyArgs(_ => throw new GitException("worktree remove", 128, "not a working tree"), _ => Task.CompletedTask);
+        _git.DeleteBranchAsync(default!, default, default).ThrowsAsyncForAnyArgs(new GitException("branch -D", 1, "checked out"));
+
+        var result = await Processor().ProcessAsync(Item(), CancellationToken.None);
+
+        result.Status.ShouldBe(WorkStatus.Done, result.Reason);
+        _git.ReceivedCalls().Select(c => c.GetMethodInfo().Name)
+            .First(n => n is "WorktreePruneAsync" or "WorktreeRemoveAsync" or "DeleteBranchAsync").ShouldBe("WorktreePruneAsync");
+    }
+
+    [Fact]
+    public async Task ClassThrows_RestoresFileAndContinuesWithNextClass()
+    {
+        // First class: written to disk, then the build throws. Second class must start from the original file.
+        _dotnet.BuildAsync(default!, default).ReturnsForAnyArgs(_ => throw new IOException("disk on fire"), _ => new DotnetResult(0, ""));
+
+        var result = await Processor().ProcessAsync(Item("Acme.Core.Calc", "Acme.Core.Calc"), CancellationToken.None);
+
+        result.Status.ShouldBe(WorkStatus.Done, result.Reason);
+        result.Reason!.ShouldContain("disk on fire");
+        (await File.ReadAllTextAsync(WtTestFile)).Split("Twice_Doubles").Length.ShouldBe(2);
+    }
+
+    [Fact]
+    public async Task SharedFile_InsertsIntoTheTypesOwnTestClass_DespitePreexistingSkip()
+    {
+        _llm.CompleteAsync(default!, default).ReturnsForAnyArgs(Response(GreeterSnippet));
+
+        var result = await Processor().ProcessAsync(Item("Acme.Core.Greeter"), CancellationToken.None);
+
+        result.Status.ShouldBe(WorkStatus.Done, result.Reason);
+        var text = await File.ReadAllTextAsync(WtTestFile);
+        text.IndexOf("Hello_Greets", StringComparison.Ordinal).ShouldBeGreaterThan(text.IndexOf("class GreeterTests", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task StatusZ_HandlesRenamesAndNonAsciiPaths()
+    {
+        Status("R  tests/Acme.Core.Tests/Zażółć.cs\0src/Acme.Core/Old.cs\0 M tests/Acme.Core.Tests/CalcTests.cs\0");
+
+        var result = await Processor().ProcessAsync(Item(), CancellationToken.None);
+
+        result.Status.ShouldBe(WorkStatus.Done, result.Reason);
+        await _wt.Received().AddAsync(Arg.Is<IEnumerable<string>>(p => p.SequenceEqual(new[] { "tests/Acme.Core.Tests/Zażółć.cs", "tests/Acme.Core.Tests/CalcTests.cs" })), Arg.Any<CancellationToken>());
+    }
+
+    [Fact]
+    public async Task SolutionBehindSymlink_WritesInsideWorktree()
+    {
+        var real = _root + "-real";
+        Directory.CreateDirectory(real);
+        Directory.CreateSymbolicLink(_root, real);
+        _git.GetRepoRootAsync(default).ReturnsForAnyArgs(real); // git reports the resolved path
+        try
+        {
+            var result = await Processor().ProcessAsync(Item(), CancellationToken.None);
+
+            result.Status.ShouldBe(WorkStatus.Done, result.Reason);
+            (await File.ReadAllTextAsync(WtTestFile)).ShouldContain("Twice_Doubles");
+        }
+        finally
+        {
+            File.Delete(_root); // the link only
+            Directory.Delete(real, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void RepoRelative_OutsideRepoStaysOutside() =>
+        WorkItemProcessor.RepoRelative(_root, Path.Combine(Path.GetTempPath(), "elsewhere", "x.cs")).ShouldStartWith("..");
+
+    [Fact]
+    public void TestProjectAtRepoRoot_AllowsEveryPath()
+    {
+        WorkItemProcessor.OutsideTestProjects(["src/A.cs", "B.cs"], ["."]).ShouldBeEmpty();
+        WorkItemProcessor.OutsideTestProjects(["src/A.cs"], ["tests/X"]).ShouldNotBeEmpty();
     }
 }

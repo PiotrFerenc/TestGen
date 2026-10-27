@@ -99,6 +99,43 @@ public sealed class QueueTests : IDisposable
     }
 
     [Fact]
+    public void Resume_carries_tokens_branch_and_coverage()
+    {
+        var old = Item("Retry", 4, WorkStatus.Failed, 1);
+        old.PromptTokens = 100;
+        old.CompletionTokens = 40;
+        old.Branch = "testgen/retry";
+        old.CoverageBefore = 0.1;
+        old.CoverageAfter = 0.5;
+
+        var item = WorkPlanner.Resume(WorkPlanner.Plan("s", "c", [old]), [Item("Retry", 4)], maxRetries: 3).Items.Single();
+
+        item.Status.ShouldBe(WorkStatus.Pending);
+        item.Attempts.ShouldBe(1);
+        item.PromptTokens.ShouldBe(100);
+        item.CompletionTokens.ShouldBe(40);
+        item.Branch.ShouldBe("testgen/retry");
+        item.CoverageBefore.ShouldBe(0.1);
+        item.CoverageAfter.ShouldBe(0.5);
+    }
+
+    [Fact]
+    public async Task WorkerPool_store_failure_surfaces_instead_of_hanging()
+    {
+        // Parent of the state file is a regular file -> every SaveAsync throws IOException.
+        var blocker = Path.Combine(_dir, "blocker");
+        File.WriteAllText(blocker, "");
+        var store = new StateStore(Path.Combine(blocker, "state.json"));
+        var processor = Substitute.For<IWorkItemProcessor>();
+        processor.ProcessAsync(Arg.Any<WorkItem>(), Arg.Any<CancellationToken>()).Returns(new WorkResult(WorkStatus.Done));
+        var items = Enumerable.Range(0, 10).Select(i => Item($"I{i}", i)).ToList();
+
+        var run = new WorkerPool(processor, store).RunAsync(WorkPlanner.Plan("s", "c", items), 2, default);
+
+        await Should.ThrowAsync<IOException>(() => run.WaitAsync(TimeSpan.FromSeconds(10)));
+    }
+
+    [Fact]
     public async Task WorkerPool_applies_results_and_exceptions()
     {
         var items = new[] { Item("Ok", 3), Item("Bad", 2), Item("Skip", 1), Item("Boom", 0), Item("Old", 9, WorkStatus.Done) };

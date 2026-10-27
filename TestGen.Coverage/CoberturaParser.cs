@@ -10,9 +10,7 @@ public static partial class CoberturaParser
     public static CoverageSnapshot Parse(string xml)
     {
         var doc = XDocument.Parse(xml);
-        var timestamp = long.TryParse(doc.Root?.Attribute("timestamp")?.Value, out var ts)
-            ? DateTimeOffset.FromUnixTimeSeconds(ts)
-            : DateTimeOffset.UtcNow;
+        var timestamp = ParseTimestamp(doc.Root?.Attribute("timestamp")?.Value);
 
         var classes = new Dictionary<string, ClassCoverage>();
         foreach (var cls in doc.Descendants("class"))
@@ -40,6 +38,17 @@ public static partial class CoberturaParser
         }
 
         return new CoverageSnapshot(timestamp, classes.Values.ToList());
+    }
+
+    // Cobertura spec says Unix milliseconds; dotnet-coverage writes seconds. Anything past year 9999 in seconds is ms.
+    static DateTimeOffset ParseTimestamp(string? value)
+    {
+        if (!long.TryParse(value, out var ts) || ts < 0) return DateTimeOffset.UtcNow;
+        try
+        {
+            return ts > 253402300799 ? DateTimeOffset.FromUnixTimeMilliseconds(ts) : DateTimeOffset.FromUnixTimeSeconds(ts);
+        }
+        catch (ArgumentOutOfRangeException) { return DateTimeOffset.UtcNow; }
     }
 
     static ClassCoverage Create(string fullName, string file, IReadOnlyList<MethodCoverage> methods)

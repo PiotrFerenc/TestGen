@@ -33,6 +33,7 @@ public interface IDotnetRunner
 public sealed class DotnetRunner(ILogger<DotnetRunner>? logger = null) : IDotnetRunner
 {
     private static readonly TimeSpan DefaultBuildTimeout = TimeSpan.FromMinutes(15);
+    static readonly TimeSpan StreamDrainTimeout = TimeSpan.FromSeconds(30);
 
     public Task<DotnetResult> BuildAsync(string projectOrSolution, CancellationToken ct, TimeSpan? timeout = null)
         => RunAsync($"build \"{projectOrSolution}\" --nologo -v q", Path.GetDirectoryName(projectOrSolution)!, timeout ?? DefaultBuildTimeout, ct);
@@ -79,7 +80,19 @@ public sealed class DotnetRunner(ILogger<DotnetRunner>? logger = null) : IDotnet
             return new DotnetResult(-1, $"dotnet {args} timed out after {timeout}.");
         }
 
-        var output = (await stdout) + (await stderr);
-        return new DotnetResult(process.ExitCode, output);
+        return new DotnetResult(process.ExitCode, await DrainAsync(stdout, stderr, StreamDrainTimeout, ct, () =>
+        {
+            try { process.Kill(entireProcessTree: true); } catch { /* already gone */ }
+            logger?.LogWarning("dotnet {Args}: output streams still open {Timeout} after exit", args, StreamDrainTimeout);
+        }));
+    }
+
+    /// <summary>A grandchild (e.g. a build server) can keep the pipes open after exit: bound the read, then return what completed.</summary>
+    public static async Task<string> DrainAsync(Task<string> stdout, Task<string> stderr, TimeSpan timeout, CancellationToken ct, Action? onTimeout = null)
+    {
+        try { await Task.WhenAll(stdout, stderr).WaitAsync(timeout, ct); }
+        catch (TimeoutException) { onTimeout?.Invoke(); }
+        static string Read(Task<string> t) => t.IsCompletedSuccessfully ? t.Result : "";
+        return Read(stdout) + Read(stderr);
     }
 }

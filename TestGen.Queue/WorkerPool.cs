@@ -15,13 +15,15 @@ public sealed class WorkerPool(IWorkItemProcessor processor, StateStore store, I
     {
         parallelism = Math.Max(1, parallelism);
         var channel = Channel.CreateBounded<WorkItem>(parallelism);
+        // Cancelled by ct or by the first faulting worker, so the producer never blocks on a channel nobody reads.
+        using var stop = CancellationTokenSource.CreateLinkedTokenSource(ct);
 
         var producer = Task.Run(async () =>
         {
             try
             {
                 foreach (var item in state.Items.Where(i => i.Status == WorkStatus.Pending).OrderByDescending(i => i.UncoveredLines))
-                    await channel.Writer.WriteAsync(item, ct);
+                    await channel.Writer.WriteAsync(item, stop.Token);
             }
             catch (OperationCanceledException) { }
             finally { channel.Writer.Complete(); }
@@ -31,13 +33,18 @@ public sealed class WorkerPool(IWorkItemProcessor processor, StateStore store, I
         {
             try
             {
-                await foreach (var item in channel.Reader.ReadAllAsync(ct))
+                await foreach (var item in channel.Reader.ReadAllAsync(stop.Token))
                     await ProcessOne(state, item, ct);
             }
-            catch (OperationCanceledException) { }
+            catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+            catch
+            {
+                stop.Cancel();
+                throw;
+            }
         }, CancellationToken.None)).ToList();
 
-        await Task.WhenAll(workers.Append(producer));
+        await Task.WhenAll(workers.Append(producer)); // rethrows a worker's exception
 
         if (ct.IsCancellationRequested)
         {
@@ -62,7 +69,7 @@ public sealed class WorkerPool(IWorkItemProcessor processor, StateStore store, I
             item.CompletionTokens += r.CompletionTokens;
             item.CoverageAfter = r.CoverageAfter ?? item.CoverageAfter;
             Change(item, r.Status, r.Reason);
-            logger?.LogInformation("{Id}: {Status} {Reason}", item.Id, r.Status, r.Reason);
+            logger?.LogInformation("{Id}: {Status} {Reason}", item.Id, r.Status, r.Reason ?? "");
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {

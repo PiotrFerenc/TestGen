@@ -94,6 +94,42 @@ public class SnippetPipelineTests
     }
 
     [Fact]
+    public async Task InsertAsync_ClassName_TargetsNamedClassIncludingNested()
+    {
+        const string existing = """
+            using Xunit;
+
+            namespace Acme.Core.Tests;
+
+            public class Helpers { }
+
+            public class Outer
+            {
+                public class CalcTests { }
+            }
+            """;
+        var s = Create(Samples.Prod, [("CalcTests.cs", existing)]);
+        var result = await TestInserter.InsertAsync(Doc(s, "CalcTests.cs"), Parse(LooseSnippet), default, "CalcTests");
+        result.IndexOf("Run_Zero_ReturnsOne").ShouldBeGreaterThan(result.IndexOf("class CalcTests"));
+        result.ShouldContain("public class Helpers { }");
+
+        var ex = await Should.ThrowAsync<InvalidOperationException>(() => TestInserter.InsertAsync(Doc(s, "CalcTests.cs"), Parse(LooseSnippet), default, "Nope"));
+        ex.Message.ShouldContain("'Nope' not found");
+    }
+
+    [Fact]
+    public void Validate_RejectsSkipAndTrivialAssert()
+    {
+        var r = SnippetValidator.Validate("""
+            [Fact(Skip = "x")] public void A() { Assert.Equal(1, 2); }
+            [Fact] public void B() { Assert.True(true); }
+            """, Conv);
+        r.IsValid.ShouldBeFalse();
+        r.Errors.ShouldContain(e => e.StartsWith("A:") && e.Contains("skipped"));
+        r.Errors.ShouldContain(e => e.StartsWith("B:") && e.Contains("trivial assertion"));
+    }
+
+    [Fact]
     public void CreateNewFile_FileScopedOrBlockNamespace()
     {
         var snippet = Parse(LooseSnippet);
@@ -148,6 +184,20 @@ public class SnippetPipelineTests
             ["tests/Acme.Core.Tests/CalcTests.cs", "tests\\Acme.Core.Tests\\Sub\\X.cs", "src/Acme.Core/Calc.cs", "tests/Acme.Core.TestsX/A.cs"],
             ["tests/Acme.Core.Tests/"]);
         errors.ShouldBe(["File outside test projects changed: src/Acme.Core/Calc.cs", "File outside test projects changed: tests/Acme.Core.TestsX/A.cs"]);
+    }
+
+    [Theory]
+    [InlineData(".")]
+    [InlineData("./")]
+    [InlineData("")]
+    public void CheckOnlyTestProjectsTouched_RepoRootProject_MatchesAll(string dir) =>
+        QualityGuard.CheckOnlyTestProjectsTouched(["Calc.cs", "src/A.cs", ".config/x.json"], [dir]).ShouldBeEmpty();
+
+    [Fact]
+    public void CheckOnlyTestProjectsTouched_DottedDirKeptIntact()
+    {
+        QualityGuard.CheckOnlyTestProjectsTouched(["./.config/x.json", "config/y.json"], [".config"])
+            .ShouldBe(["File outside test projects changed: config/y.json"]);
     }
 
     [Fact]

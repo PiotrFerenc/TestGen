@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Options;
 
 namespace TestGen.Llm;
@@ -36,7 +37,12 @@ public sealed class PromptBuilder(IOptions<LlmOptions> options)
         if (!Fits() && state.TestFile is not null)
             state = state with { TestFile = TruncateHead(state.TestFile, BudgetChars(Measure(state with { TestFile = TruncatedMarker }), max), keepClassHeader: true) };
         if (!Fits())
-            state = state with { ClassSource = TruncateHead(state.ClassSource, BudgetChars(Measure(state with { ClassSource = TruncatedMarker }), max), keepClassHeader: false) };
+        {
+            // Cut everything but the uncovered methods first; only then cut the tail.
+            var budget = BudgetChars(Measure(state with { ClassSource = TruncatedMarker }), max);
+            state = state with { ClassSource = KeepUncovered(state.ClassSource, request.UncoveredMethods, budget) };
+            if (!Fits()) state = state with { ClassSource = TruncateHead(state.ClassSource, budget, keepClassHeader: false) };
+        }
 
         return [system, ChatMessage.User(Render(request, state))];
     }
@@ -75,6 +81,40 @@ public sealed class PromptBuilder(IOptions<LlmOptions> options)
             sb.Append(lines[i]).Append('\n');
         }
         return sb.Append(TruncatedMarker).ToString();
+    }
+
+    // ponytail: StartLine/EndLine are file lines, ClassSource is a reconstruction, so the method is found by its
+    // declaration line (first "<type> Name(" not preceded by return/await/throw) and kept for EndLine-StartLine+1 lines.
+    private static string KeepUncovered(string text, IReadOnlyList<UncoveredMethod> methods, int budgetChars)
+    {
+        var lines = text.Split('\n');
+        var keep = new bool[lines.Length];
+        foreach (var m in methods)
+        {
+            var decl = new Regex($@"^\s*(?!(return|await|throw)\b)[\w\s<>\[\],.?]*\s{Regex.Escape(m.Name)}\s*(<[^>]*>)?\s*\(");
+            var start = Array.FindIndex(lines, l => decl.IsMatch(l));
+            if (start < 0) continue;
+            for (var i = start; i < Math.Min(lines.Length, start + Math.Max(1, m.EndLine - m.StartLine + 1)); i++) keep[i] = true;
+        }
+
+        var markerCost = TruncatedMarker.Length + 1;
+        var remaining = budgetChars - lines.Where((_, i) => keep[i]).Sum(l => l.Length + 1)
+            - markerCost * (keep.Where((k, i) => k && (i == 0 || !keep[i - 1])).Count() + 1); // max markers: one per gap
+        var sb = new StringBuilder();
+        var cutting = false;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            if (!keep[i] && !cutting && lines[i].Length + 1 <= remaining) remaining -= lines[i].Length + 1;
+            else if (!keep[i])
+            {
+                if (!cutting) sb.Append(TruncatedMarker).Append('\n');
+                cutting = true;
+                continue;
+            }
+            else if (cutting && remaining > 0) cutting = false; // after a kept method, resume filling if budget allows
+            sb.Append(lines[i]).Append('\n');
+        }
+        return sb.ToString().TrimEnd('\n');
     }
 
     private static string Render(GenerationRequest r, State s)

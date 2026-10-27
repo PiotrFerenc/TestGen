@@ -48,6 +48,35 @@ public class SymbolAnalysisTests
     }
 
     [Fact]
+    public async Task FullSource_NestedType_WrappedInContainingTypeWithoutOuterMembers()
+    {
+        var inner = (await TypeLocator.FindTypeAsync(Create(Samples.Prod), "Acme.Core.Services.Calc/Inner", default))!;
+        var src = TypeLocator.FullSource(inner);
+        src.ShouldContain("namespace Acme.Core.Services;\n\npublic class Calc\n{\n    public class Inner { public void Go() { } }\n}\n");
+        src.ShouldNotContain("Add(");
+    }
+
+    const string PartialA = "using System;\nnamespace Acme.Core;\npublic partial class Mapper\n{\n    public T Map<T>(T x) => x;\n}\n";
+    const string PartialB = "using System.Linq;\nnamespace Acme.Core;\npublic partial class Mapper\n{\n    public int Other() => 1;\n}\n";
+
+    [Fact]
+    public async Task FullSource_PartialType_AllPartsAndUsings()
+    {
+        var mapper = (await TypeLocator.FindTypeAsync(Create([("A.cs", PartialA), ("B.cs", PartialB)]), "Acme.Core.Mapper", default))!;
+        var src = TypeLocator.FullSource(mapper);
+        src.ShouldStartWith("using System;\nusing System.Linq;\n");
+        src.ShouldContain("Map<T>(T x)");
+        src.ShouldContain("Other()");
+    }
+
+    [Fact]
+    public async Task FindMethod_GenericAritySuffix_Stripped()
+    {
+        var mapper = (await TypeLocator.FindTypeAsync(Create([("A.cs", PartialA), ("B.cs", PartialB)]), "Acme.Core.Mapper", default))!;
+        TypeLocator.FindMethod(mapper, "Map`1", null)!.Identifier.Text.ShouldBe("Map");
+    }
+
+    [Fact]
     public void TrimMethodBodies_KeepsNamedMethods_StubsOthers()
     {
         var trimmed = SourceTrimmer.TrimMethodBodies(Samples.Calc, new HashSet<string> { "Helper" });

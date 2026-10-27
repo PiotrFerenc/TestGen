@@ -30,5 +30,6 @@ public sealed class ProgressUiTests : IDisposable
         var lines = output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries);
         lines.Length.ShouldBe(100); // Running + Done per item
         lines.ShouldContain(l => l.Contains("(50/0/0/50)"));
+        lines.ShouldAllBe(l => !l.Contains("null") && !l.Contains("  ("));
     }
 }

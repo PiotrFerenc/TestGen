@@ -7,8 +7,10 @@ public sealed record CoverageExclusions
 {
     public IReadOnlyList<string> FileGlobs { get; init; } = ["*.g.cs", "*.Designer.cs", "*.generated.cs"];
     public IReadOnlyList<string> ClassNames { get; init; } = ["Program"];
-    /// <summary>Matched against namespace segments and source directory names.</summary>
+    /// <summary>Matched against namespace segments and, when <see cref="RootDir"/> is set, directory names below it.</summary>
     public IReadOnlyList<string> NamespaceSegments { get; init; } = ["Migrations"];
+    /// <summary>Solution/repo root; source paths are matched relative to it so ancestor dirs never exclude.</summary>
+    public string? RootDir { get; init; }
     public bool ExcludeLogicless { get; init; } = true;
 
     static readonly HashSet<string> RecordMembers =
@@ -22,7 +24,13 @@ public sealed record CoverageExclusions
         var fileName = Path.GetFileName(c.SourceFile);
         if (FileGlobs.Any(g => FileSystemName.MatchesSimpleExpression(g, fileName))) return true;
         if (ClassNames.Any(n => n == c.Name || n == c.FullName || n == c.DisplayName)) return true;
-        var segments = c.Namespace.Split('.').Concat(c.SourceFile.Split('/', '\\'));
+        var segments = c.Namespace.Split('.').AsEnumerable();
+        if (RootDir is not null && c.SourceFile.Length > 0)
+        {
+            var rel = Path.GetRelativePath(RootDir, c.SourceFile);
+            if (!rel.StartsWith("..") && !Path.IsPathRooted(rel))
+                segments = segments.Concat(Path.GetDirectoryName(rel)!.Split('/', '\\'));
+        }
         if (segments.Any(s => NamespaceSegments.Contains(s, StringComparer.OrdinalIgnoreCase))) return true;
         return ExcludeLogicless && IsLogicless(c);
     }

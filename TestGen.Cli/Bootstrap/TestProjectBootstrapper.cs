@@ -63,14 +63,15 @@ public sealed class TestProjectBootstrapper(IGitRunner repoGit, IDotnetRunner do
                 packages.Select(p => (p, versions.GetValueOrDefault(p) ?? DefaultVersions[p]))));
             File.WriteAllText(Path.Combine(dir, "GlobalUsings.cs"), string.Concat(usings.Select(u => $"global using {u};\n")));
 
-            Ensure(await dotnet.RunAsync($"sln \"{options.SolutionPath}\" add \"{csproj}\"", options.SolutionDir, TimeSpan.FromMinutes(2), ct), "dotnet sln add", csproj);
+            // Restore first: a failed restore must not leave the project half-added to the solution.
             Ensure(await dotnet.RestoreAsync(csproj, ct), "dotnet restore", csproj);
+            Ensure(await dotnet.RunAsync($"sln \"{options.SolutionPath}\" add \"{csproj}\"", options.SolutionDir, TimeSpan.FromMinutes(2), ct), "dotnet sln add", csproj);
             logger.LogInformation("Created test project {Csproj} for {Project}", csproj, prod.Name);
             created.Add(csproj);
         }
 
         if (created.Count == 0) return new BootstrapResult([], null);
-        await repoGit.AddAllAsync(ct);
+        await repoGit.AddAsync([options.SolutionPath, .. created.Select(c => Path.GetDirectoryName(c)!)], ct);
         var sha = await repoGit.CommitAsync("testgen: bootstrap test projects", ct);
         return new BootstrapResult(created, sha);
     }

@@ -12,7 +12,7 @@ public static class WorkPlanner
 
     /// <summary>
     /// Merges a fresh plan into a previous run: Done/Skipped kept as-is, Running/Failed/Pending rescheduled as Pending
-    /// with Attempts carried over, unless Attempts >= maxRetries (then Failed). Items missing from fresh are dropped.
+    /// with Attempts, tokens, Branch and coverage carried over, unless Attempts >= maxRetries (then Failed). Items missing from fresh are dropped.
     /// </summary>
     public static RunState Resume(RunState previous, IEnumerable<WorkItem> fresh, int maxRetries)
     {
@@ -23,6 +23,10 @@ public static class WorkPlanner
             if (p.Status is WorkStatus.Done or WorkStatus.Skipped) return p;
             f.Attempts = p.Attempts;
             f.CoverageBefore ??= p.CoverageBefore;
+            f.CoverageAfter ??= p.CoverageAfter;
+            f.Branch ??= p.Branch;
+            f.PromptTokens += p.PromptTokens;
+            f.CompletionTokens += p.CompletionTokens;
             if (p.Attempts >= maxRetries)
             {
                 f.Status = WorkStatus.Failed;

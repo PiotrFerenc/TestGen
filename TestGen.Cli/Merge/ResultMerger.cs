@@ -22,6 +22,13 @@ public sealed class ResultMerger(IGitRunner repoGit, IDotnetRunner dotnet, TestG
         // ponytail: full build+test per merge is slow but correct; batch merges if it hurts.
         foreach (var item in state.Items.Where(i => i is { Status: WorkStatus.Done, Branch: not null }))
         {
+            if (!await repoGit.BranchExistsAsync(item.Branch!, ct))
+            {
+                // Merged and deleted by an earlier run that stopped before saving state.
+                logger.LogInformation("Branch {Branch} of {Id} no longer exists; treating it as already merged", item.Branch, item.Id);
+                item.Branch = null;
+                continue;
+            }
             var sha = await repoGit.HeadShaAsync(ct);
             try
             {

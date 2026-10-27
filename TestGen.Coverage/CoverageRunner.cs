@@ -17,6 +17,7 @@ public interface ICoverageRunner
 public sealed class CoverageRunner(ILogger<CoverageRunner>? logger = null, string toolPath = "dotnet-coverage") : ICoverageRunner
 {
     readonly ILogger _log = logger ?? NullLogger<CoverageRunner>.Instance;
+    static readonly TimeSpan OutputGrace = TimeSpan.FromSeconds(30);
 
     public async Task<bool> IsToolAvailableAsync(CancellationToken ct)
     {
@@ -62,7 +63,9 @@ public sealed class CoverageRunner(ILogger<CoverageRunner>? logger = null, strin
         foreach (var a in args) psi.ArgumentList.Add(a);
 
         var sb = new StringBuilder();
-        using var p = new Process { StartInfo = psi };
+        using var p = new Process { StartInfo = psi, EnableRaisingEvents = true };
+        var exited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        p.Exited += (_, _) => exited.TrySetResult();
         p.OutputDataReceived += (_, e) => { if (e.Data != null) lock (sb) sb.AppendLine(e.Data); };
         p.ErrorDataReceived += (_, e) => { if (e.Data != null) lock (sb) sb.AppendLine(e.Data); };
         try { p.Start(); }
@@ -74,7 +77,8 @@ public sealed class CoverageRunner(ILogger<CoverageRunner>? logger = null, strin
         cts.CancelAfter(timeout);
         try
         {
-            await p.WaitForExitAsync(cts.Token);
+            // Not WaitForExitAsync: it also waits for pipe EOF, which a grandchild can hold open forever.
+            await exited.Task.WaitAsync(cts.Token);
         }
         catch (OperationCanceledException)
         {
@@ -82,7 +86,15 @@ public sealed class CoverageRunner(ILogger<CoverageRunner>? logger = null, strin
             ct.ThrowIfCancellationRequested();
             throw new CoverageException($"dotnet-coverage timed out after {timeout}:\n{Tail(sb.ToString())}");
         }
-        p.WaitForExit(); // flush async output
+        // Flush async output, bounded: a grandchild holding the pipes must not hang us.
+        using var grace = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        grace.CancelAfter(OutputGrace);
+        try { await p.WaitForExitAsync(grace.Token); }
+        catch (OperationCanceledException)
+        {
+            try { p.Kill(entireProcessTree: true); } catch (InvalidOperationException) { }
+            ct.ThrowIfCancellationRequested();
+        }
         lock (sb) return (p.ExitCode, sb.ToString());
     }
 

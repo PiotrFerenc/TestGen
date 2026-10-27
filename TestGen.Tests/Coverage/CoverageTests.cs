@@ -92,6 +92,33 @@ public class CoverageTests : IDisposable
         new CoverageExclusions().IsExcluded(Cls(fullName)).ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("1700000000", 1700000000000L)]      // seconds (dotnet-coverage)
+    [InlineData("1700000000123", 1700000000123L)]   // milliseconds (cobertura spec)
+    public void Parse_Timestamp_SecondsOrMilliseconds(string raw, long expectedMs) =>
+        CoberturaParser.Parse($"<coverage timestamp=\"{raw}\"/>").Timestamp.ToUnixTimeMilliseconds().ShouldBe(expectedMs);
+
+    [Theory]
+    [InlineData("abc")]
+    [InlineData("-5")]
+    [InlineData("99999999999999999")]
+    public void Parse_Timestamp_InvalidFallsBackToNow(string raw)
+    {
+        var before = DateTimeOffset.UtcNow;
+        CoberturaParser.Parse($"<coverage timestamp=\"{raw}\"/>").Timestamp.ShouldBeGreaterThanOrEqualTo(before);
+    }
+
+    [Fact]
+    public void Exclusions_PathSegmentsOnlyBelowRootDir()
+    {
+        var c = Cls("App.Core.Calculator") with { SourceFile = "/home/u/Migrations/repo/src/App.Core/Calculator.cs" };
+        new CoverageExclusions().IsExcluded(c).ShouldBeFalse();
+        new CoverageExclusions { RootDir = "/home/u/Migrations/repo" }.IsExcluded(c).ShouldBeFalse();
+        var migration = c with { SourceFile = "/home/u/Migrations/repo/src/App.Core/Migrations/Init.cs" };
+        new CoverageExclusions().IsExcluded(migration).ShouldBeFalse();
+        new CoverageExclusions { RootDir = "/home/u/Migrations/repo" }.IsExcluded(migration).ShouldBeTrue();
+    }
+
     [Fact]
     public void IsLogicless_OnlyForAccessorsAndCtors()
     {

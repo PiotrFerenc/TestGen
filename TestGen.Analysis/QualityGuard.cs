@@ -30,7 +30,7 @@ public static class QualityGuard
 
     public static IReadOnlyList<string> CheckOnlyTestProjectsTouched(IEnumerable<string> changedFilesRelativeToRepo, IEnumerable<string> testProjectDirsRelativeToRepo)
     {
-        var dirs = testProjectDirsRelativeToRepo.Select(d => Norm(d).TrimEnd('/') + "/").ToList();
+        var dirs = testProjectDirsRelativeToRepo.Select(Norm).Select(d => d is "" or "." ? "" : d.TrimEnd('/') + "/").ToList(); // "" matches all (test project at repo root)
         return changedFilesRelativeToRepo
             .Where(f => !dirs.Any(d => Norm(f).StartsWith(d, StringComparison.Ordinal)))
             .Select(f => $"File outside test projects changed: {f}").ToList();
@@ -39,7 +39,11 @@ public static class QualityGuard
     public static IReadOnlyList<string> CheckForbiddenPatterns(string testFileText) =>
         TestSyntax.Check(CSharpSyntaxTree.ParseText(testFileText).GetRoot(), requireAssertions: false).ToList();
 
-    static string Norm(string path) => path.Replace('\\', '/').TrimStart('.', '/');
+    static string Norm(string path)
+    {
+        var p = path.Replace('\\', '/');
+        return p.StartsWith("./", StringComparison.Ordinal) ? p[2..] : p;
+    }
 
     static IEnumerable<MemberDeclarationSyntax> Members(CompilationUnitSyntax root) =>
         root.DescendantNodes().OfType<MemberDeclarationSyntax>().Where(m => m is not (BaseTypeDeclarationSyntax or BaseNamespaceDeclarationSyntax or DelegateDeclarationSyntax));

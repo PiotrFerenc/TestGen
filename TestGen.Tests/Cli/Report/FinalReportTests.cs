@@ -54,8 +54,9 @@ public sealed class FinalReportTests : IDisposable
         var root = json.RootElement;
         root.GetProperty("Totals").GetProperty("Done").GetInt32().ShouldBe(1);
         root.GetProperty("Totals").GetProperty("Failed").GetInt32().ShouldBe(1);
-        root.GetProperty("Coverage").GetProperty("Before").GetDouble().ShouldBe(25);
-        root.GetProperty("Coverage").GetProperty("After").GetDouble().ShouldBe(75);
+        root.GetProperty("Coverage").GetProperty("BeforePercent").GetDouble().ShouldBe(25);
+        root.GetProperty("Coverage").GetProperty("AfterPercent").GetDouble().ShouldBe(75);
+        root.GetProperty("Coverage").GetProperty("DeltaPercent").GetDouble().ShouldBe(50);
         root.GetProperty("Merged")[0].GetString().ShouldBe("foo-1");
         root.GetProperty("Rejected")[0].GetProperty("Reason").GetString().ShouldBe("merge conflict");
         root.GetProperty("Tokens").GetProperty("Total").GetInt64().ShouldBe(120);
@@ -68,6 +69,8 @@ public sealed class FinalReportTests : IDisposable
         md.ShouldContain("| foo-1 | Acme.Foo | Done | 1 | 25% | 75% | 120 |");
         md.ShouldContain("\\| pipe");
         md.ShouldContain("| Done | 1 |");
+        md.ShouldContain("this run");
+        md.ShouldContain("0..1 fractions");
     }
 
     [Fact]

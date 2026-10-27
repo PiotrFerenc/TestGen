@@ -65,6 +65,17 @@ public class CoverageRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task Collect_GrandchildHoldingPipe_ReportsRealExitNotTimeout()
+    {
+        // Tool exits 3 at once; the backgrounded sleep keeps stdout open for 2 s (longer than the 1 s timeout).
+        var runner = new CoverageRunner(toolPath: FakeTool("echo early; sleep 2 & exit 3"));
+        var ex = await Should.ThrowAsync<CoverageException>(() =>
+            runner.CollectAsync(Path.Combine(_dir, "x.sln"), Path.Combine(_dir, "c.xml"), TimeSpan.FromSeconds(1), CancellationToken.None));
+        ex.Message.ShouldContain("exited with 3");
+        ex.Message.ShouldContain("early");
+    }
+
+    [Fact]
     public async Task Collect_PassesArgumentsAndReturnsOutputPath()
     {
         // Writes "$@" (one arg per line) into the file following -o.

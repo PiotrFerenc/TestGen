@@ -23,7 +23,13 @@ public static class FinalReport
             state.BaseCommit,
             state.StartedAt,
             Totals = state.Totals().ToDictionary(kv => kv.Key.ToString(), kv => kv.Value),
-            Coverage = new { Before = Percent(before), After = after is null ? (double?)null : Percent(after) },
+            // Totals in percent (0..100); per-item CoverageBefore/After are 0..1 fractions.
+            Coverage = new
+            {
+                BeforePercent = Percent(before),
+                AfterPercent = after is null ? (double?)null : Percent(after),
+                DeltaPercent = after is null ? (double?)null : Math.Round(Percent(after) - Percent(before), 2),
+            },
             Merged = merge.MergedIds,
             Rejected = merge.Rejected.Select(r => new { r.Id, r.Reason }),
             merge.FullBuildOk,
@@ -47,11 +53,12 @@ public static class FinalReport
 
         var md = new StringBuilder()
             .AppendLine("# TestGen summary").AppendLine()
+            .AppendLine("_Merged and token counts cover this run (invocation) only. summary.json: `Coverage.*Percent` are 0..100, per-item `CoverageBefore`/`CoverageAfter` are 0..1 fractions._").AppendLine()
             .AppendLine($"- Solution: `{state.SolutionPath}`")
             .AppendLine($"- Coverage: {CoverageLine(before, after)}")
             .AppendLine($"- Full build: {(merge.FullBuildOk ? "ok" : "FAILED")}, full test: {(merge.FullTestOk ? "ok" : "FAILED")}")
-            .AppendLine($"- Merged: {merge.MergedIds.Count}, rejected: {merge.Rejected.Count}")
-            .AppendLine($"- Tokens: {tokens.PromptTokens} prompt + {tokens.CompletionTokens} completion = {tokens.Total} ({tokens.Requests} requests)")
+            .AppendLine($"- Merged this run: {merge.MergedIds.Count}, rejected: {merge.Rejected.Count}")
+            .AppendLine($"- Tokens this run: {tokens.PromptTokens} prompt + {tokens.CompletionTokens} completion = {tokens.Total} ({tokens.Requests} requests)")
             .AppendLine().AppendLine("| Status | Count |").AppendLine("|---|---|");
         foreach (var (status, count) in state.Totals()) md.AppendLine($"| {status} | {count} |");
         md.AppendLine().AppendLine("| Id | Classes | Status | Attempts | Coverage before | Coverage after | Tokens | Reason |").AppendLine("|---|---|---|---|---|---|---|---|");

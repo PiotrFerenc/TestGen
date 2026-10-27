@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
+using Microsoft.CodeAnalysis.Text;
 
 namespace TestGen.Analysis;
 
@@ -31,6 +32,7 @@ public static class TypeLocator
 
     public static MethodDeclarationSyntax? FindMethod(INamedTypeSymbol type, string methodName, string? coberturaSignature)
     {
+        methodName = Regex.Replace(methodName, @"`\d+$", ""); // cobertura: Map`1
         var candidates = type.GetMembers(methodName).OfType<IMethodSymbol>()
             .Select(m => (Symbol: m, Syntax: m.DeclaringSyntaxReferences.Select(r => r.GetSyntax()).OfType<MethodDeclarationSyntax>().FirstOrDefault()))
             .Where(c => c.Syntax is not null).ToList();
@@ -48,14 +50,28 @@ public static class TypeLocator
         return (span.StartLinePosition.Line + 1, span.EndLinePosition.Line + 1);
     }
 
+    /// <summary>Usings + namespace + every declaration of the type (all partial parts), each wrapped in its containing-type headers.</summary>
     public static string FullSource(INamedTypeSymbol type)
     {
-        var decl = Declarations(type).FirstOrDefault() ?? throw new InvalidOperationException($"{type} has no source declaration");
-        var usings = decl.SyntaxTree.GetCompilationUnitRoot().Usings
-            .Concat(decl.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().Reverse().SelectMany(n => n.Usings))
-            .Select(u => u.ToString());
+        var decls = Declarations(type);
+        if (decls.Count == 0) throw new InvalidOperationException($"{type} has no source declaration");
+        var usings = decls.SelectMany(d => d.SyntaxTree.GetCompilationUnitRoot().Usings
+                .Concat(d.Ancestors().OfType<BaseNamespaceDeclarationSyntax>().Reverse().SelectMany(n => n.Usings)))
+            .Select(u => u.ToString()).Distinct();
         var ns = type.ContainingNamespace.IsGlobalNamespace ? "" : $"namespace {type.ContainingNamespace.ToDisplayString()};\n\n";
-        return string.Join("\n", usings) + "\n\n" + ns + decl.ToFullString().Trim('\r', '\n') + "\n";
+        return string.Join("\n", usings) + "\n\n" + ns + string.Join("\n\n", decls.Select(Wrapped)) + "\n";
+    }
+
+    static string Wrapped(TypeDeclarationSyntax decl)
+    {
+        var text = decl.ToFullString().Trim('\r', '\n');
+        foreach (var outer in decl.Ancestors().OfType<TypeDeclarationSyntax>())
+        {
+            var header = decl.SyntaxTree.GetText().ToString(TextSpan.FromBounds(outer.SpanStart, outer.OpenBraceToken.SpanStart)).TrimEnd();
+            var indent = new string(' ', outer.GetLeadingTrivia().ToString().Split('\n')[^1].Length);
+            text = $"{indent}{header}\n{indent}{{\n{text}\n{indent}}}";
+        }
+        return text;
     }
 
     static string Normalize(string typeName) =>

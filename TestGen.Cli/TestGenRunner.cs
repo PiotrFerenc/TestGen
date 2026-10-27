@@ -35,12 +35,7 @@ public sealed class TestGenRunner(
         // Resume: state.json present => keep testgen/result as is; otherwise start it fresh from the current HEAD.
         var store = new StateStore(StateStore.DefaultPath(o.SolutionDir));
         var previous = await store.LoadAsync(ct);
-        var onResult = await git.CurrentBranchAsync(ct) == TestGenOptions.ResultBranch;
-        if (previous is null && !onResult && await git.BranchExistsAsync(TestGenOptions.ResultBranch, ct))
-            await git.DeleteBranchAsync(TestGenOptions.ResultBranch, force: true, ct);
-        if (!await git.BranchExistsAsync(TestGenOptions.ResultBranch, ct))
-            await git.CreateBranchAsync(TestGenOptions.ResultBranch, "HEAD", ct);
-        if (!onResult) await git.CheckoutAsync(TestGenOptions.ResultBranch, ct);
+        await PrepareResultBranchAsync(git, previous is not null, log, DateTime.Now, ct);
         if (previous is not null) AnsiConsole.MarkupLine($"[yellow]Resuming run started {previous.StartedAt:u}[/]");
 
         ProgressUi.Section("Coverage (before)");
@@ -50,7 +45,7 @@ public sealed class TestGenRunner(
         else
         {
             var xml = await coverage.CollectAsync(solutionPath, Path.Combine(o.WorkDir, "coverage-before.xml"), o.TestTimeout, ct);
-            before = new CoverageExclusions().Apply(CoberturaParser.ParseFile(xml));
+            before = new CoverageExclusions { RootDir = o.SolutionDir }.Apply(CoberturaParser.ParseFile(xml));
         }
 
         ProgressUi.Section("Analysis");
@@ -96,7 +91,7 @@ public sealed class TestGenRunner(
         try
         {
             var xml = await coverage.CollectAsync(solutionPath, Path.Combine(o.WorkDir, "coverage-after.xml"), o.TestTimeout, ct);
-            after = CoverageScope.Apply(new CoverageExclusions().Apply(CoberturaParser.ParseFile(xml)), solution);
+            after = CoverageScope.Apply(new CoverageExclusions { RootDir = o.SolutionDir }.Apply(CoberturaParser.ParseFile(xml)), solution);
             CoverageReportWriter.WriteJson(after, Path.Combine(o.WorkDir, "coverage-after.json"));
             CoverageReportWriter.WriteHtml(before, after, Path.Combine(o.WorkDir, "coverage-report.html"));
             PrintTotals("after", after);
@@ -110,6 +105,22 @@ public sealed class TestGenRunner(
         FinalReport.Write(state, before, after, merge, tokens, o.WorkDir);
         FinalReport.Print(state, before, after, merge, tokens);
         return merge.FullBuildOk && merge.FullTestOk ? 0 : 4;
+    }
+
+    /// <summary>Checks out <see cref="TestGenOptions.ResultBranch"/>; without state a stale one is renamed aside and a fresh one started from HEAD.</summary>
+    public static async Task PrepareResultBranchAsync(IGitRunner git, bool hasState, ILogger log, DateTime now, CancellationToken ct)
+    {
+        const string result = TestGenOptions.ResultBranch;
+        var onResult = await git.CurrentBranchAsync(ct) == result;
+        if (!hasState && !onResult && await git.BranchExistsAsync(result, ct))
+        {
+            var stale = $"{result}-{now:yyyyMMdd-HHmmss}";
+            log.LogWarning("{Branch} exists without state.json; renaming it to {Stale}", result, stale);
+            await git.RunAsync($"branch -m {result} {stale}", ct);
+        }
+        if (!await git.BranchExistsAsync(result, ct))
+            await git.CreateBranchAsync(result, "HEAD", ct);
+        if (!onResult) await git.CheckoutAsync(result, ct);
     }
 
     static void PrintTotals(string label, CoverageSnapshot s) =>

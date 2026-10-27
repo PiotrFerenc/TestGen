@@ -36,7 +36,7 @@ public sealed class ProgressUi : IDisposable
                 _ => "grey",
             };
             int Count(WorkStatus s) => _status.Values.Count(v => v == s);
-            _console.MarkupLine($"[grey]{Markup.Escape(item.Id)}[/] [{colour}]{item.Status}[/] {Markup.Escape(item.Reason ?? "")} " +
+            _console.MarkupLine($"[grey]{Markup.Escape(item.Id)}[/] [{colour}]{item.Status}[/] {(string.IsNullOrEmpty(item.Reason) ? "" : Markup.Escape(item.Reason) + " ")}" +
                                 $"[grey]({Count(WorkStatus.Done)}/{Count(WorkStatus.Failed)}/{Count(WorkStatus.Skipped)}/{_total})[/]");
         }
     }

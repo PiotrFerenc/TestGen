@@ -114,6 +114,29 @@ public class PromptBuilderTests
     }
 
     [Fact]
+    public void Trimming_finally_keeps_uncovered_method_body()
+    {
+        var source = "public class Calc\n{\n"
+            + string.Join("\n", Enumerable.Range(0, 100).Select(i => $"    // HEAD filler {i}"))
+            + "\n    public int Add(int a, int b)\n    {\n        // UNCOVERED body start\n        return a + b; // UNCOVERED body end\n    }\n"
+            + string.Join("\n", Enumerable.Range(0, 100).Select(i => $"    // TAIL filler {i}")) + "\n}";
+        var request = Request() with { ClassSource = source, ClassSourceTrimmed = source, UncoveredMethods = [new UncoveredMethod("Add", 50, 54, [52, 53])] };
+        var minimal = Size(request with { DependencySignatures = [], CallPathHints = [] });
+
+        var messages = Builder(minimal - 800).BuildGeneration(request);
+        var user = User(messages);
+
+        user.ShouldContain("public class Calc");
+        user.ShouldContain("public int Add(int a, int b)");
+        user.ShouldContain("// UNCOVERED body start");
+        user.ShouldContain("return a + b; // UNCOVERED body end");
+        user.ShouldNotContain("HEAD filler 99");
+        user.ShouldNotContain("TAIL filler 99");
+        user.ShouldContain(PromptBuilder.TruncatedMarker);
+        TokenEstimator.Estimate(messages).ShouldBeLessThanOrEqualTo(minimal - 800);
+    }
+
+    [Fact]
     public void BuildRepair_appends_assistant_code_and_capped_errors()
     {
         var builder = Builder();

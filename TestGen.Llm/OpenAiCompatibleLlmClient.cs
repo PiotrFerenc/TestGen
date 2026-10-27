@@ -1,4 +1,3 @@
-using System.Net.Http.Json;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -30,7 +29,9 @@ public sealed class OpenAiCompatibleLlmClient(
         try
         {
             logger.LogDebug("LLM request: {Count} messages, ~{Tokens} tokens", messages.Count, TokenEstimator.Estimate(messages));
-            response = await client.PostAsJsonAsync("chat/completions", body, ct);
+            // StringContent (not PostAsJsonAsync/JsonContent) so Content-Length is sent; some servers reject chunked bodies.
+            using var content = new StringContent(JsonSerializer.Serialize(body), System.Text.Encoding.UTF8, "application/json");
+            response = await client.PostAsync("chat/completions", content, ct);
             text = await response.Content.ReadAsStringAsync(ct);
         }
         catch (HttpRequestException ex)

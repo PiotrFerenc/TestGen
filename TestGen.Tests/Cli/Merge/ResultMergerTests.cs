@@ -21,6 +21,7 @@ public sealed class ResultMergerTests
     {
         _git.CurrentBranchAsync(default).ReturnsForAnyArgs(TestGenOptions.ResultBranch);
         _git.HeadShaAsync(default).ReturnsForAnyArgs("sha0", "sha1", "sha2");
+        _git.BranchExistsAsync(default!, default).ReturnsForAnyArgs(true);
         _dotnet.BuildAsync(default!, default).ReturnsForAnyArgs(Ok);
         _dotnet.TestAsync(default!, default, default).ReturnsForAnyArgs(Ok);
     }
@@ -111,6 +112,20 @@ public sealed class ResultMergerTests
         report.FullBuildOk.ShouldBeFalse();
         report.FullTestOk.ShouldBeFalse();
         await _dotnet.DidNotReceiveWithAnyArgs().TestAsync(default!, default, default);
+    }
+
+    [Fact]
+    public async Task Missing_branch_is_treated_as_already_merged()
+    {
+        var a = Done("a");
+        _git.BranchExistsAsync("testgen/a", Arg.Any<CancellationToken>()).Returns(false);
+
+        var report = await Sut().MergeAsync(State(a), CancellationToken.None);
+
+        report.Rejected.ShouldBeEmpty();
+        a.Status.ShouldBe(WorkStatus.Done);
+        a.Branch.ShouldBeNull();
+        await _git.DidNotReceiveWithAnyArgs().MergeAsync(default!, default);
     }
 
     [Fact]
