@@ -31,6 +31,8 @@ public static class FinalReport
                 DeltaPercent = after is null ? (double?)null : Math.Round(Percent(after) - Percent(before), 2),
             },
             Merged = merge.MergedIds,
+            // Done items whose branch was consumed by a merge, across all runs (resume-safe).
+            MergedTotal = state.Items.Where(i => i.Status == WorkStatus.Done && i.Branch is null).Select(i => i.Id).ToList(),
             Rejected = merge.Rejected.Select(r => new { r.Id, r.Reason }),
             merge.FullBuildOk,
             merge.FullTestOk,
@@ -57,7 +59,7 @@ public static class FinalReport
             .AppendLine($"- Solution: `{state.SolutionPath}`")
             .AppendLine($"- Coverage: {CoverageLine(before, after)}")
             .AppendLine($"- Full build: {(merge.FullBuildOk ? "ok" : "FAILED")}, full test: {(merge.FullTestOk ? "ok" : "FAILED")}")
-            .AppendLine($"- Merged this run: {merge.MergedIds.Count}, rejected: {merge.Rejected.Count}")
+            .AppendLine($"- Merged this run: {merge.MergedIds.Count}, rejected: {merge.Rejected.Count}; merged in total: {state.Items.Count(i => i.Status == WorkStatus.Done && i.Branch is null)}")
             .AppendLine($"- Tokens this run: {tokens.PromptTokens} prompt + {tokens.CompletionTokens} completion = {tokens.Total} ({tokens.Requests} requests)")
             .AppendLine().AppendLine("| Status | Count |").AppendLine("|---|---|");
         foreach (var (status, count) in state.Totals()) md.AppendLine($"| {status} | {count} |");

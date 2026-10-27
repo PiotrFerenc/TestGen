@@ -210,7 +210,9 @@ public sealed class WorkItemProcessor(
             messages = prompts.BuildRepair(messages, code, errors);
         }
 
-        return new(false, $"retries exhausted: {string.Join(" | ", errors.Take(3))}");
+        // One line per error, whitespace collapsed, so the reason fits the console table and state.json.
+        var brief = errors.Take(3).Select(e => string.Join(' ', e.Split((char[])null!, StringSplitOptions.RemoveEmptyEntries)));
+        return new(false, $"retries exhausted: {string.Join(" | ", brief)}");
     }
 
     /// <summary>Validates, inserts on top of <paramref name="original"/>, writes, builds and tests. Empty list = green.</summary>
