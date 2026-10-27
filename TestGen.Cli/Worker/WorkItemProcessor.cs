@@ -1,0 +1,273 @@
+using Microsoft.CodeAnalysis;
+using Microsoft.CodeAnalysis.Text;
+using Microsoft.Extensions.Logging;
+using TestGen.Analysis;
+using TestGen.Coverage;
+using TestGen.Git;
+using TestGen.Llm;
+using TestGen.Queue;
+
+namespace TestGen.Cli.Worker;
+
+/// <summary>Generates tests for one work item in its own git worktree/branch; see PLAN.md section 6.</summary>
+public sealed class WorkItemProcessor(
+    Solution solution, TestConventions conventions, CoverageSnapshot coverageBefore,
+    IGitRunner repoGit, ILlmClient llm, PromptBuilder prompts, ICoverageRunner coverage, IDotnetRunner dotnet,
+    TestGenOptions options, ILogger<WorkItemProcessor> logger) : IWorkItemProcessor
+{
+    static readonly string[] UnmockableSuffixes = ["DbContext", "HttpClient", "HttpContext"];
+    const int MaxHints = 10;
+
+    public async Task<WorkResult> ProcessAsync(WorkItem item, CancellationToken ct)
+    {
+        var branch = TestGenOptions.BranchPrefix + item.Id;
+        var wtDir = Path.Combine(options.WorkDir, "wt", item.Id);
+        var run = new Run(item);
+        try
+        {
+            await CleanupAsync(wtDir, branch, ct);
+            logger.LogInformation("{Id}: creating worktree {Dir} on {Branch}", item.Id, wtDir, branch);
+            var worktree = await repoGit.WorktreeAddAsync(wtDir, branch, TestGenOptions.ResultBranch, ct);
+
+            var repoRoot = await repoGit.GetRepoRootAsync(ct);
+            string Map(string p) => Path.Combine(wtDir, Path.GetRelativePath(repoRoot, p));
+            var testProject = solution.Projects.FirstOrDefault(p => SamePath(p.FilePath, item.TestProjectPath))
+                              ?? throw new InvalidOperationException($"Test project {item.TestProjectPath} not in solution");
+            var ctx = new ItemContext(item, testProject, Map(item.TestProjectPath), Map(item.TargetTestFile));
+
+            var succeeded = new List<WorkClass>();
+            var skipped = new List<string>();
+            var failed = new List<string>();
+            foreach (var cls in item.Classes)
+            {
+                var outcome = await ProcessClassAsync(ctx, cls, run, ct);
+                if (outcome is null) succeeded.Add(cls);
+                else if (outcome.Skipped) skipped.Add($"{cls.FullName}: {outcome.Reason}");
+                else failed.Add($"{cls.FullName}: {outcome.Reason}");
+            }
+
+            if (succeeded.Count == 0)
+            {
+                await RollbackAsync(item.Id, wtDir, branch);
+                return failed.Count == 0
+                    ? run.Result(WorkStatus.Skipped, string.Join("; ", skipped))
+                    : run.Result(WorkStatus.Failed, string.Join("; ", failed.Concat(skipped)));
+            }
+
+            logger.LogInformation("{Id}: checking changed files", item.Id);
+            var changed = await ChangedFilesAsync(worktree, ct);
+            var testDirs = SolutionLoader.TestProjects(solution).Where(p => p.FilePath is not null)
+                .Select(p => Path.GetRelativePath(repoRoot, Path.GetDirectoryName(p.FilePath)!));
+            var violations = QualityGuard.CheckOnlyTestProjectsTouched(changed, testDirs);
+            if (violations.Count > 0) return await FailAsync(run, wtDir, branch, string.Join("; ", violations));
+
+            logger.LogInformation("{Id}: measuring coverage", item.Id);
+            var xml = await coverage.CollectAsync(ctx.TestProjectPath, Path.Combine(wtDir, ".testgen-coverage.xml"), options.TestTimeout, ct, noBuild: true);
+            var after = CoberturaParser.ParseFile(xml);
+            File.Delete(xml);
+            var gained = succeeded.Any(c => (CoverageDiff.RateFor(after, c.FullName) ?? 0) > (CoverageDiff.RateFor(coverageBefore, c.FullName) ?? item.CoverageBefore ?? 0));
+            if (!gained) return await FailAsync(run, wtDir, branch, "no coverage gain");
+            var mine = after.Classes.Where(c => succeeded.Any(s => s.FullName == c.FullName)).ToList();
+            var total = mine.Sum(c => c.TotalLines);
+            double? coverageAfter = total == 0 ? null : (double)mine.Sum(c => c.CoveredLines) / total;
+
+            if (options.RunNewTestsTwice)
+            {
+                logger.LogInformation("{Id}: re-running tests for flakiness", item.Id);
+                var again = await dotnet.TestAsync(ctx.TestProjectPath, options.TestTimeout, ct, noBuild: true);
+                if (!again.Success) return await FailAsync(run, wtDir, branch, "flaky");
+            }
+
+            logger.LogInformation("{Id}: committing {Files}", item.Id, string.Join(", ", changed));
+            await worktree.AddAsync(changed, ct);
+            await worktree.CommitAsync("testgen: tests for " + string.Join(", ", succeeded.Select(c => c.FullName)), ct);
+            await repoGit.WorktreeRemoveAsync(wtDir, force: true, ct);
+            await repoGit.WorktreePruneAsync(ct);
+            var reason = failed.Count + skipped.Count == 0 ? null : string.Join("; ", failed.Concat(skipped));
+            return run.Result(WorkStatus.Done, reason, branch, coverageAfter);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            await RollbackAsync(item.Id, wtDir, branch);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "{Id}: worker failed", item.Id);
+            return await FailAsync(run, wtDir, branch, ex.Message);
+        }
+    }
+
+    sealed record ItemContext(WorkItem Item, Project TestProject, string TestProjectPath, string WorktreeTestFile);
+
+    sealed record ClassOutcome(bool Skipped, string Reason);
+
+    sealed class Run(WorkItem item)
+    {
+        public int Prompt, Completion;
+
+        public WorkResult Result(WorkStatus status, string? reason, string? branch = null, double? coverageAfter = null) =>
+            new(status, reason, branch, Prompt, Completion, coverageAfter);
+
+        public string Id => item.Id;
+    }
+
+    /// <summary>Returns null on success, otherwise why the class was skipped/failed.</summary>
+    async Task<ClassOutcome?> ProcessClassAsync(ItemContext ctx, WorkClass cls, Run run, CancellationToken ct)
+    {
+        var id = ctx.Item.Id;
+        logger.LogInformation("{Id}: generating tests for {Class}", id, cls.FullName);
+        var type = await TypeLocator.FindTypeAsync(solution, cls.FullName, ct);
+        if (type is null) return new(true, "type not found in solution");
+        var classCoverage = coverageBefore.Classes.FirstOrDefault(c => c.FullName == cls.FullName);
+        if (classCoverage is null) return new(true, "class not in coverage report");
+
+        var deps = DependencyCollector.Collect(type);
+        var unmockable = deps.CtorParams.FirstOrDefault(IsUnmockable);
+        if (unmockable is not null) return new(true, $"unmockable dependency: {unmockable.TypeFullName}");
+
+        var uncovered = classCoverage.Methods.Where(m => !m.IsFullyCovered).Select(m =>
+        {
+            var syntax = TypeLocator.FindMethod(type, m.Name, m.Signature);
+            var (start, end) = syntax is null ? (m.StartLine, m.EndLine) : TypeLocator.LineSpan(syntax);
+            return new UncoveredMethod(m.Name, start, end, m.UncoveredLineNumbers);
+        }).ToList();
+        var names = uncovered.Select(m => m.Name).ToHashSet();
+        var source = TypeLocator.FullSource(type);
+
+        var hints = new List<string>();
+        foreach (var method in type.GetMembers().OfType<IMethodSymbol>().Where(m => names.Contains(m.Name) && m.DeclaredAccessibility != Accessibility.Public))
+        {
+            if (hints.Count >= MaxHints) break;
+            hints.AddRange(await CallPathFinder.FindPathsAsync(solution, method, ct: ct));
+        }
+
+        var snapshot = File.Exists(ctx.WorktreeTestFile) ? await File.ReadAllTextAsync(ctx.WorktreeTestFile, ct) : null;
+        string? testClassName = null, testNamespace = null;
+        if (snapshot is null)
+        {
+            var target = await TestLocator.FindAsync(solution, type, ct);
+            testClassName = target?.TestClassName ?? type.Name + "Tests";
+            testNamespace = target?.Namespace ?? (type.ContainingNamespace.IsGlobalNamespace ? "" : type.ContainingNamespace.ToDisplayString());
+        }
+
+        var request = new GenerationRequest(cls.FullName, source, SourceTrimmer.TrimMethodBodies(source, names), uncovered, snapshot,
+            conventions.Summarize(), deps.MemberSignatures, hints.Take(MaxHints).ToList(), testClassName, testNamespace);
+        var messages = prompts.BuildGeneration(request);
+
+        IReadOnlyList<string> errors = [];
+        for (var attempt = 1; attempt <= options.MaxRetries + 1; attempt++)
+        {
+            logger.LogInformation("{Id}: {Class} attempt {Attempt}", id, cls.FullName, attempt);
+            var response = await llm.CompleteAsync(messages, ct);
+            run.Prompt += response.PromptTokens;
+            run.Completion += response.CompletionTokens;
+            var code = CodeBlockExtractor.Extract(response.Content);
+
+            errors = await TryApplyAsync(ctx, code, snapshot, testClassName ?? type.Name + "Tests", testNamespace ?? "", ct);
+            if (errors.Count == 0) return null;
+            logger.LogInformation("{Id}: {Class} attempt {Attempt} rejected: {Errors}", id, cls.FullName, attempt, string.Join(" | ", errors.Take(5)));
+            messages = prompts.BuildRepair(messages, code, errors);
+        }
+
+        // Restore the file as it was before this class.
+        if (snapshot is null) File.Delete(ctx.WorktreeTestFile);
+        else await File.WriteAllTextAsync(ctx.WorktreeTestFile, snapshot, ct);
+        return new(false, $"retries exhausted: {string.Join(" | ", errors.Take(3))}");
+    }
+
+    /// <summary>Validates, inserts on top of <paramref name="original"/>, writes, builds and tests. Empty list = green.</summary>
+    async Task<IReadOnlyList<string>> TryApplyAsync(ItemContext ctx, string code, string? original, string className, string ns, CancellationToken ct)
+    {
+        var validation = SnippetValidator.Validate(code, conventions);
+        if (!validation.IsValid) return validation.Errors;
+
+        string newText;
+        if (original is null)
+            newText = TestInserter.CreateNewFile(className, ns, conventions, validation.Parsed!);
+        else
+        {
+            var existing = ctx.TestProject.Documents.FirstOrDefault(d => SamePath(d.FilePath, ctx.Item.TargetTestFile));
+            var doc = existing is not null
+                ? existing.WithText(SourceText.From(original))
+                : ctx.TestProject.AddDocument(Path.GetFileName(ctx.Item.TargetTestFile), SourceText.From(original), filePath: ctx.Item.TargetTestFile);
+            newText = await TestInserter.InsertAsync(doc, validation.Parsed!, ct);
+        }
+
+        var errors = (original is null ? [] : QualityGuard.CheckOnlyAdditions(original, newText))
+            .Concat(QualityGuard.CheckForbiddenPatterns(newText)).ToList();
+        if (errors.Count > 0) return errors;
+
+        var compileErrors = await CompilationChecker.GetErrorsAsync(ctx.TestProject, ctx.Item.TargetTestFile, newText, ct);
+        if (compileErrors.Count > 0) return compileErrors;
+
+        Directory.CreateDirectory(Path.GetDirectoryName(ctx.WorktreeTestFile)!);
+        await File.WriteAllTextAsync(ctx.WorktreeTestFile, newText, ct);
+
+        logger.LogInformation("{Id}: building {Project}", ctx.Item.Id, ctx.TestProjectPath);
+        var build = await dotnet.BuildAsync(ctx.TestProjectPath, ct);
+        if (!build.Success) return Errors(build);
+        logger.LogInformation("{Id}: testing {Project}", ctx.Item.Id, ctx.TestProjectPath);
+        var test = await dotnet.TestAsync(ctx.TestProjectPath, options.TestTimeout, ct, noBuild: true);
+        return test.Success ? [] : Errors(test);
+    }
+
+    static IReadOnlyList<string> Errors(DotnetResult r) =>
+        r.ErrorLines.Count > 0 ? r.ErrorLines : r.Output.Split('\n').TakeLast(20).ToList();
+
+    static bool IsUnmockable(CtorParam p)
+    {
+        if (p.IsInterface || p.IsAbstract) return false;
+        var simple = p.TypeFullName.Split('<')[0].Split('.')[^1];
+        return UnmockableSuffixes.Any(s => simple.EndsWith(s, StringComparison.Ordinal))
+               || p.TypeFullName.StartsWith("System.IO.", StringComparison.Ordinal)
+               || simple == "Socket";
+    }
+
+    // ponytail: bin/obj are ignored here (and never committed) for repos lacking a .gitignore for build output.
+    static async Task<IReadOnlyList<string>> ChangedFilesAsync(IGitRunner worktree, CancellationToken ct)
+    {
+        var status = await worktree.RunAsync("status --porcelain", ct);
+        return status.StdOut.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => l.Length > 3)
+            .Select(l => l[3..].Split(" -> ")[^1].Trim().Trim('"'))
+            .Where(p => !p.Replace('\\', '/').Split('/').Any(s => s is "bin" or "obj"))
+            .ToList();
+    }
+
+    async Task CleanupAsync(string wtDir, string branch, CancellationToken ct)
+    {
+        if (Directory.Exists(wtDir))
+        {
+            logger.LogInformation("Removing leftover worktree {Dir}", wtDir);
+            await repoGit.WorktreeRemoveAsync(wtDir, force: true, ct);
+            await repoGit.WorktreePruneAsync(ct);
+        }
+        if (await repoGit.BranchExistsAsync(branch, ct))
+        {
+            logger.LogInformation("Deleting leftover branch {Branch}", branch);
+            await repoGit.DeleteBranchAsync(branch, force: true, ct);
+        }
+    }
+
+    async Task<WorkResult> FailAsync(Run run, string wtDir, string branch, string reason)
+    {
+        logger.LogInformation("{Id}: failed: {Reason}", run.Id, reason);
+        await RollbackAsync(run.Id, wtDir, branch);
+        return run.Result(WorkStatus.Failed, reason);
+    }
+
+    async Task RollbackAsync(string id, string wtDir, string branch)
+    {
+        logger.LogInformation("{Id}: rolling back", id);
+        try { await repoGit.WorktreeRemoveAsync(wtDir, force: true, CancellationToken.None); }
+        catch (Exception ex) { logger.LogWarning(ex, "{Id}: worktree remove failed", id); }
+        try { await repoGit.WorktreePruneAsync(CancellationToken.None); }
+        catch (Exception ex) { logger.LogWarning(ex, "{Id}: worktree prune failed", id); }
+        try { await repoGit.DeleteBranchAsync(branch, force: true, CancellationToken.None); }
+        catch (Exception ex) { logger.LogWarning(ex, "{Id}: branch delete failed", id); }
+    }
+
+    static bool SamePath(string? a, string? b) =>
+        a is not null && b is not null && Path.GetFullPath(a) == Path.GetFullPath(b);
+}
