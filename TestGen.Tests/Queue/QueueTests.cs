@@ -205,7 +205,7 @@ public sealed class QueueTests : IDisposable
     }
 
     [Fact]
-    public async Task WorkerPool_cancellation_resets_running_to_pending()
+    public async Task WorkerPool_cancellation_resets_running_to_pending_without_consuming_an_attempt()
     {
         using var cts = new CancellationTokenSource();
         var started = new TaskCompletionSource();
@@ -224,8 +224,10 @@ public sealed class QueueTests : IDisposable
         var state = await run;
 
         state.Items.ShouldAllBe(i => i.Status == WorkStatus.Pending);
-        state.Items[0].Attempts.ShouldBe(1);
-        (await store.LoadAsync(default))!.Items.ShouldAllBe(i => i.Status == WorkStatus.Pending);
+        state.Items[0].Attempts.ShouldBe(0);
+        var saved = (await store.LoadAsync(default))!;
+        saved.Items.ShouldAllBe(i => i.Status == WorkStatus.Pending && i.Attempts == 0);
+        WorkPlanner.Resume(saved, [Item("A", 2), Item("B", 1)], maxRetries: 1).Items.ShouldAllBe(i => i.Status == WorkStatus.Pending);
     }
 
     [Fact]

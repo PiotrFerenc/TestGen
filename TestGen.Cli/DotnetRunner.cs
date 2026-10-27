@@ -8,17 +8,33 @@ public sealed record DotnetResult(int ExitCode, string Output)
 {
     public bool Success => ExitCode == 0;
 
-    /// <summary>Lines that look like compiler/test errors, for the LLM repair loop.</summary>
-    public IReadOnlyList<string> ErrorLines => Output
-        .Split('\n')
-        .Select(l => l.TrimEnd())
-        .Where(l => l.Contains(": error ", StringComparison.Ordinal)
-                 || l.Contains("[FAIL]", StringComparison.Ordinal)
-                 || l.Contains("Failed ", StringComparison.Ordinal)
-                 || l.Contains("Assert", StringComparison.Ordinal)
-                 || l.Contains("Exception", StringComparison.Ordinal))
-        .Distinct()
-        .ToList();
+    /// <summary>Lines that look like compiler/test errors, plus each failed test's "Error Message:" block (expected/actual), for the LLM repair loop.</summary>
+    public IReadOnlyList<string> ErrorLines
+    {
+        get
+        {
+            var lines = new List<string>();
+            var seen = new HashSet<string>();
+            var inMessage = false;
+            foreach (var l in Output.Split('\n').Select(l => l.TrimEnd()))
+            {
+                var t = l.TrimStart();
+                if (t == "Error Message:") { inMessage = true; lines.Add(l); continue; }
+                if (t.StartsWith("Stack Trace:", StringComparison.Ordinal) || t.StartsWith("Standard Output Messages:", StringComparison.Ordinal)
+                    || t.StartsWith("Failed ", StringComparison.Ordinal) || t.StartsWith("Passed ", StringComparison.Ordinal)) inMessage = false;
+                if (inMessage) lines.Add(l); // not de-duplicated: "should be"/"but was" blocks repeat across failures
+                else if (IsErrorLine(l) && seen.Add(l)) lines.Add(l);
+            }
+            return lines;
+        }
+    }
+
+    static bool IsErrorLine(string l) =>
+        l.Contains(": error ", StringComparison.Ordinal)
+        || l.Contains("[FAIL]", StringComparison.Ordinal)
+        || l.Contains("Failed ", StringComparison.Ordinal)
+        || l.Contains("Assert", StringComparison.Ordinal)
+        || l.Contains("Exception", StringComparison.Ordinal);
 }
 
 /// <summary>Runs <c>dotnet build/test/restore</c> through Process with a timeout.</summary>
@@ -40,7 +56,8 @@ public sealed class DotnetRunner(ILogger<DotnetRunner>? logger = null) : IDotnet
 
     public Task<DotnetResult> TestAsync(string projectOrSolution, TimeSpan timeout, CancellationToken ct, string? filter = null, bool noBuild = false)
     {
-        var sb = new StringBuilder($"test \"{projectOrSolution}\" --nologo -v q");
+        // No "-v q": quiet verbosity drops the "Error Message:" block (expected/actual), which the repair loop needs.
+        var sb = new StringBuilder($"test \"{projectOrSolution}\" --nologo");
         if (noBuild) sb.Append(" --no-build");
         if (!string.IsNullOrWhiteSpace(filter)) sb.Append($" --filter \"{filter}\"");
         return RunAsync(sb.ToString(), Path.GetDirectoryName(projectOrSolution)!, timeout, ct);

@@ -73,6 +73,7 @@ public sealed class WorkerPool(IWorkItemProcessor processor, StateStore store, I
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
+            item.Attempts--; // a Ctrl+C is not a failed attempt; otherwise repeated cancels let Resume mark the item Failed
             Change(item, WorkStatus.Pending, null);
             await store.SaveAsync(state, CancellationToken.None);
             throw;

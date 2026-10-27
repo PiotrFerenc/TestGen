@@ -17,4 +17,37 @@ public sealed class DotnetRunnerTests
         output.ShouldBe("built ok\n");
         timedOut.ShouldBeTrue();
     }
+
+    [Fact]
+    public void ErrorLines_keep_the_failed_test_message_with_expected_and_actual_but_not_the_stack()
+    {
+        const string output = """
+            [xUnit.net 00:00:00.25]     Sample.GreeterTests.Greet [FAIL]
+              Failed Sample.GreeterTests.Greet [35 ms]
+              Error Message:
+               Shouldly.ShouldAssertException : new Greeter().Greet("Ann")
+                should be
+            "Hello, Bob!"
+                but was
+            "Hello, Ann!"
+              Stack Trace:
+                 at Sample.GreeterTests.Greet() in /x/GreeterTests.cs:line 11
+
+            Failed!  - Failed:     1, Passed:     6
+            """;
+
+        var lines = new DotnetResult(1, output).ErrorLines;
+
+        lines.ShouldContain("\"Hello, Bob!\"");
+        lines.ShouldContain("\"Hello, Ann!\"");
+        lines.ShouldContain(l => l.Contains("but was"));
+        lines.ShouldNotContain(l => l.Contains("line 11"));
+    }
+
+    [Fact]
+    public void ErrorLines_deduplicate_repeated_compiler_errors()
+    {
+        const string e = "/x/A.cs(10,5): error CS0103: The name 'Foo' does not exist";
+        new DotnetResult(1, e + "\n" + e + "\n").ErrorLines.ShouldBe([e]);
+    }
 }
